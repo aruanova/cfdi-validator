@@ -72,6 +72,20 @@ type CFDIDetails2022 struct {
 	IsValid                             bool            `json:"isValid"`
 }
 
+// Validate implementa che
+func (r *CFDIDetails2022) Validate() error {
+	// Ejemplo de regla: UUID no vacío
+	if r.Uuid == uuid.Nil {
+		return fmt.Errorf("uuid vacío")
+	}
+	// Ejemplo: CfdiId no vacío
+	if r.CfdiId == "" {
+		return fmt.Errorf("cfdiId vacío")
+	}
+	// Aquí puedes añadir más reglas de validación...
+	return nil
+}
+
 func main() {
 	excelPath := flag.String("excel", "", "ruta al archivo Excel .xlsx")
 	sheet := flag.String("sheet", "", "nombre de la hoja en el Excel")
@@ -116,18 +130,14 @@ func countExcelRowsStreaming(path, sheetName string) (int, error) {
 	defer rows.Close()
 
 	// saltar cabecera
-	if rows.Next() {
-		// nada
+	if rows.Next() { /* descartar primera fila */
 	}
 
 	cnt := 0
 	for rows.Next() {
 		cnt++
 	}
-	if err := rows.Error(); err != nil {
-		return cnt, err
-	}
-	return cnt, nil
+	return cnt, rows.Error()
 }
 
 // countAllJSONObjects recorre jsonDir y suma objetos de cada .json.
@@ -144,14 +154,14 @@ func countAllJSONObjects(jsonDir string) (int, error) {
 		if err != nil {
 			return fmt.Errorf("en %s: %w", d.Name(), err)
 		}
-		fmt.Printf(" → %s: %d objetos\n", d.Name(), cnt)
+		fmt.Printf(" → %s: %d objetos válidos\n", d.Name(), cnt)
 		total += cnt
 		return nil
 	})
 	return total, err
 }
 
-// countJSONObjects cuenta elementos de un array JSON en streaming.
+// countJSONObjects cuenta y valida elementos de un JSON (array o NDJSON).
 func countJSONObjects(path string) (int, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -159,58 +169,66 @@ func countJSONObjects(path string) (int, error) {
 	}
 	defer f.Close()
 
-	// Reader con capacidad de hacer Peek
 	r := bufio.NewReader(f)
-	// Saltar cualquier espacio/blanco inicial
+	// saltar espacios en blanco iniciales
 	for {
 		b, err := r.Peek(1)
 		if err != nil {
 			return 0, err
 		}
-		if b[0] == ' ' || b[0] == '\n' || b[0] == '\r' || b[0] == '\t' {
+		if b[0] <= ' ' {
 			_, _ = r.ReadByte()
 			continue
 		}
 		break
 	}
-	// Vemos el primer byte “significativo”
-	b, _ := r.Peek(1)
+
 	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
 
+	b, _ := r.Peek(1)
 	cnt := 0
+
 	switch b[0] {
 	case '[':
-		// === caso array JSON ===
-		// Consume el '[' inicial
+		// JSON array
 		if _, err := dec.Token(); err != nil {
 			return 0, err
 		}
-		// Itera mientras haya elementos dentro del array
 		for dec.More() {
 			var rec CFDIDetails2022
 			if err := dec.Decode(&rec); err != nil {
-				return cnt, err
+				log.Printf("ERROR decode %s: registro %d: %v", path, cnt+1, err)
+				continue
+			}
+			if err := rec.Validate(); err != nil {
+				log.Printf("ERROR validación %s: registro %d: %v", path, cnt+1, err)
+				continue
 			}
 			cnt++
 		}
-		// Consume el ']' final
 		if _, err := dec.Token(); err != nil {
 			return cnt, err
 		}
+
 	case '{':
-		// === caso NDJSON ===
-		// Cada dec.Decode leerá un objeto {…} tras otro hasta EOF
+		// NDJSON (un objeto por línea)
 		for {
 			var rec CFDIDetails2022
 			if err := dec.Decode(&rec); err != nil {
 				if err == io.EOF {
 					break
 				}
-				return cnt, err
+				log.Printf("ERROR decode %s: registro %d: %v", path, cnt+1, err)
+				continue
+			}
+			if err := rec.Validate(); err != nil {
+				log.Printf("ERROR validación %s: registro %d: %v", path, cnt+1, err)
+				continue
 			}
 			cnt++
 		}
+
 	default:
 		return 0, fmt.Errorf("archivo %s no parece ni array JSON ni NDJSON", path)
 	}
