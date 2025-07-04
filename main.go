@@ -1,4 +1,3 @@
-// cfdi-validator/main.go
 package main
 
 import (
@@ -6,16 +5,16 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
+	"github.com/xuri/excelize/v2"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
-
-	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
-	"github.com/xuri/excelize/v2"
 )
 
+// CFDIDetails2022 representa la estructura de cada objeto JSON.
 type CFDIDetails2022 struct {
 	CfdiId                              string          `json:"cfdiId"`
 	Status                              string          `json:"status"`
@@ -72,97 +71,168 @@ type CFDIDetails2022 struct {
 	IsValid                             bool            `json:"isValid"`
 }
 
-// Validate implementa che
+// excelHeaderByJSONField mapea cada campo JSON a su encabezado en el Excel
+var excelHeaderByJSONField = map[string]string{
+	"cfdiId":                              "ID",
+	"status":                              "ESTATUS",
+	"cfdiRelationType":                    "TIPO RELACION",
+	"relatedCfdi":                         "CFDI RELACIONADO",
+	"type":                                "TIPO COMPROBANTE",
+	"uuid":                                "UUID",
+	"series":                              "SERIE",
+	"reference":                           "FOLIO",
+	"emitterRfc":                          "EMISOR",
+	"emitterCompanyName":                  "RAZON SOCIAL EMISOR",
+	"emitterPostalCode":                   "Emisor Codigo Postal",
+	"cfdiUsage":                           "USO CFDI",
+	"receiverRfc":                         "RECEPTOR",
+	"receiverCompanyName":                 "RAZON SOCIAL RECEPTOR",
+	"receptorPostalCode":                  "Receptor Codigo Postal",
+	"origin":                              "ORIGEN",
+	"currency":                            "MONEDA",
+	"stampedDate":                         "FECHA TIMBRADO",
+	"invoiceDate":                         "FECHA FACTURACION",
+	"grouping":                            "AGRUPACION",
+	"iva":                                 "IVA",
+	"subTotal":                            "SUBTOTAL",
+	"total":                               "TOTAL",
+	"exchangeRate":                        "TIPO CAMBIO",
+	"cancelled":                           "CANCELADO",
+	"discount":                            "DESCUENTO",
+	"wayOfPayment":                        "FORMA DE PAGO",
+	"certificateNumber":                   "No CERTIFICADO",
+	"conceptProductServiceKey":            "ClaveProducto o Servicio",
+	"conceptProductServiceKeyDescription": "DescClaveProducto o Servicio",
+	"concepts":                            "DESCRIPCION",
+	"conceptIdentificationNumber":         "No IDENDIFICACION",
+	"unit":                                "UNIDAD",
+	"conceptQuantity":                     "CANTIDAD",
+	"conceptAmount":                       "IMPORTE",
+	"conceptUnitValue":                    "VALOR UNITARIO",
+	"transferredIva":                      "IVA TRASLADO",
+	"transferredIeps":                     "IEPS TRASLADO",
+	"transferredBase":                     "TRASLADO BASE",
+	"withholdingTax":                      "IMPUESTO RETENIDO",
+	"transferredTax":                      "IMPUESTO TRASLADO",
+	"base16Iva":                           "IVA BASE 16",
+	"base8Iva":                            "IVA BASE 8",
+	"base0Iva":                            "IVA BASE 0",
+	"vatRateOrFee":                        "TASA O CUOTA IVA",
+	"baseExemptIva":                       "BASE IVA Exento",
+	"iepsRateOrFee":                       "TASA O CUOTA IEPS",
+	"ieps":                                "IEPS",
+	"baseIeps":                            "BASE IEPS",
+	"withholdingIsr":                      "ISR RETENIDO",
+	"paymentMethod":                       "METODO DE PAGO",
+}
+
+// Validate aplica reglas sencillas de validación sobre un registro.
 func (r *CFDIDetails2022) Validate() error {
-	// Ejemplo de regla: UUID no vacío
-	if r.Uuid == uuid.Nil {
-		return fmt.Errorf("uuid vacío")
-	}
-	// Ejemplo: CfdiId no vacío
 	if r.CfdiId == "" {
 		return fmt.Errorf("cfdiId vacío")
 	}
-	// Aquí puedes añadir más reglas de validación...
+	if r.Uuid == uuid.Nil {
+		return fmt.Errorf("uuid inválido")
+	}
+	// Agrega aquí más validaciones según sea necesario...
 	return nil
 }
 
-func main() {
-	excelPath := flag.String("excel", "", "ruta al archivo Excel .xlsx")
-	sheet := flag.String("sheet", "", "nombre de la hoja en el Excel")
-	jsonDir := flag.String("jsondir", "", "directorio que contiene archivos JSON")
-	flag.Parse()
-
-	if *excelPath == "" || *sheet == "" || *jsonDir == "" {
-		fmt.Println("Uso: cfdi-validator -excel input.xlsx -sheet CFDIDETAILS2022 -jsondir ./jsons")
-		os.Exit(1)
-	}
-
-	excelCount, err := countExcelRowsStreaming(*excelPath, *sheet)
+// loadExcelKeys lee la columna keyName de Excel y devuelve un set de valores.
+func loadExcelKeys(path, sheet, keyName string) (map[string]struct{}, error) {
+	log.Printf("▶ Abriendo Excel: %s (hoja %s)", path, sheet)
+	f, err := excelize.OpenFile(path)
 	if err != nil {
-		log.Fatalf("Error leyendo Excel: %v", err)
+		return nil, fmt.Errorf("error abriendo Excel: %w", err)
 	}
-	fmt.Printf("Filas en Excel: %d\n", excelCount)
+	defer f.Close()
 
-	jsonCount, err := countAllJSONObjects(*jsonDir)
+	rows, err := f.Rows(sheet)
 	if err != nil {
-		log.Fatalf("Error procesando JSONs: %v", err)
+		return nil, fmt.Errorf("error obteniendo filas de la hoja %q: %w", sheet, err)
 	}
-	fmt.Printf("Objetos totales en JSONs: %d\n", jsonCount)
+	defer rows.Close()
 
-	if excelCount != jsonCount {
-		log.Fatalf("❌ Mismatch: Excel=%d vs JSONs=%d", excelCount, jsonCount)
+	// 1) Leemos la primera fila como encabezado
+	if !rows.Next() {
+		return nil, fmt.Errorf("la hoja %q está vacía", sheet)
 	}
-	fmt.Println("✅ Coinciden filas Excel y total de objetos JSON.")
+	header, err := rows.Columns()
+	if err != nil {
+		return nil, fmt.Errorf("error leyendo encabezado de %q: %w", sheet, err)
+	}
+	log.Printf("   Encabezados detectados: %v", header)
+
+	// 2) Buscamos el índice de la columna keyName
+	log.Printf("   Buscando columna %q en el encabezado...", keyName)
+	keyIdx := -1
+	for i, h := range header {
+		if h == keyName {
+			keyIdx = i
+			break
+		}
+	}
+	if keyIdx < 0 {
+		return nil, fmt.Errorf("columna %q no encontrada entre %v", keyName, header)
+	}
+	log.Printf("   Columna %q encontrada en índice %d", keyName, keyIdx)
+
+	// 3) Iteramos el resto de filas y vamos acumulando
+	set := make(map[string]struct{}, 1_000_000)
+	count := 0
+	for rows.Next() {
+		row, err := rows.Columns()
+		if err != nil {
+			return nil, err
+		}
+		if keyIdx < len(row) && row[keyIdx] != "" {
+			set[row[keyIdx]] = struct{}{}
+		}
+		count++
+		if count%200000 == 0 {
+			log.Printf("   → %d filas leídas del Excel...", count)
+		}
+	}
+	log.Printf("✔ Cargados %d CFDiIds únicos desde el Excel", len(set))
+	return set, nil
 }
 
-// countExcelRowsStreaming cuenta filas (sin cabecera) en modo streaming.
-func countExcelRowsStreaming(path, sheetName string) (int, error) {
+// countExcelRowsStreaming cuenta las filas (sin cabecera) de la hoja Excel.
+func countExcelRowsStreaming(path, sheet string) (int, error) {
+	log.Printf("▶ Contando filas en Excel: %s (hoja %s)", path, sheet)
 	f, err := excelize.OpenFile(path)
 	if err != nil {
 		return 0, err
 	}
 	defer f.Close()
 
-	rows, err := f.Rows(sheetName)
+	rows, err := f.Rows(sheet)
 	if err != nil {
 		return 0, err
 	}
 	defer rows.Close()
 
-	// saltar cabecera
-	if rows.Next() { /* descartar primera fila */
+	// Saltar cabecera
+	if rows.Next() {
+		log.Printf("   Cabecera saltada")
+		// nada
 	}
 
 	cnt := 0
 	for rows.Next() {
 		cnt++
+		if cnt%250000 == 0 {
+			log.Printf("   → %d filas contadas hasta ahora...", cnt)
+		}
 	}
+	log.Printf("✔ Total de filas en Excel: %d", cnt)
 	return cnt, rows.Error()
 }
 
-// countAllJSONObjects recorre jsonDir y suma objetos de cada .json.
-func countAllJSONObjects(jsonDir string) (int, error) {
-	total := 0
-	err := filepath.WalkDir(jsonDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || filepath.Ext(path) != ".json" {
-			return nil
-		}
-		cnt, err := countJSONObjects(path)
-		if err != nil {
-			return fmt.Errorf("en %s: %w", d.Name(), err)
-		}
-		fmt.Printf(" → %s: %d objetos válidos\n", d.Name(), cnt)
-		total += cnt
-		return nil
-	})
-	return total, err
-}
-
-// countJSONObjects cuenta y valida elementos de un JSON (array o NDJSON).
-func countJSONObjects(path string) (int, error) {
+// countJSONObjects cuenta y valida objetos JSON en path, chequeando también
+// los primeros 5 cfdiId contra excelKeys.
+func countJSONObjects(path string, excelKeys map[string]struct{}) (int, error) {
+	log.Printf("▶ Procesando JSON: %s", path)
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
@@ -170,7 +240,7 @@ func countJSONObjects(path string) (int, error) {
 	defer f.Close()
 
 	r := bufio.NewReader(f)
-	// saltar espacios en blanco iniciales
+	// Saltar espacios en blanco iniciales
 	for {
 		b, err := r.Peek(1)
 		if err != nil {
@@ -186,11 +256,22 @@ func countJSONObjects(path string) (int, error) {
 	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
 
+	// Detectar formato (array vs NDJSON)
 	b, _ := r.Peek(1)
-	cnt := 0
-
+	var format string
 	switch b[0] {
 	case '[':
+		format = "array"
+	case '{':
+		format = "ndjson"
+	default:
+		return 0, fmt.Errorf("formato JSON desconocido en %s (byte %#x)", path, b[0])
+	}
+	log.Printf("   Formato detectado: %s", format)
+
+	cnt := 0
+	switch format {
+	case "array":
 		// JSON array
 		if _, err := dec.Token(); err != nil {
 			return 0, err
@@ -198,20 +279,29 @@ func countJSONObjects(path string) (int, error) {
 		for dec.More() {
 			var rec CFDIDetails2022
 			if err := dec.Decode(&rec); err != nil {
-				log.Printf("ERROR decode %s: registro %d: %v", path, cnt+1, err)
+				log.Printf("   ERROR decode %s registro %d: %v", filepath.Base(path), cnt+1, err)
 				continue
 			}
+			// validar los primeros 5 en Excel
+			if cnt < 5 {
+				if _, ok := excelKeys[rec.CfdiId]; !ok {
+					log.Printf("   ⚠ cfdiId %q NO encontrado en Excel", rec.CfdiId)
+				}
+			}
+			// validación de tipo
 			if err := rec.Validate(); err != nil {
-				log.Printf("ERROR validación %s: registro %d: %v", path, cnt+1, err)
-				continue
+				log.Printf("   ERROR validación registro %d: %v", cnt+1, err)
 			}
 			cnt++
+			if cnt%50000 == 0 {
+				log.Printf("   → %d objetos leídos de %s...", cnt, filepath.Base(path))
+			}
 		}
 		if _, err := dec.Token(); err != nil {
 			return cnt, err
 		}
 
-	case '{':
+	case "ndjson":
 		// NDJSON (un objeto por línea)
 		for {
 			var rec CFDIDetails2022
@@ -219,19 +309,85 @@ func countJSONObjects(path string) (int, error) {
 				if err == io.EOF {
 					break
 				}
-				log.Printf("ERROR decode %s: registro %d: %v", path, cnt+1, err)
+				log.Printf("   ERROR decode %s registro %d: %v", filepath.Base(path), cnt+1, err)
 				continue
+			}
+			if cnt < 5 {
+				if _, ok := excelKeys[rec.CfdiId]; !ok {
+					log.Printf("   ⚠ cfdiId %q NO encontrado en Excel", rec.CfdiId)
+				}
 			}
 			if err := rec.Validate(); err != nil {
-				log.Printf("ERROR validación %s: registro %d: %v", path, cnt+1, err)
-				continue
+				log.Printf("   ERROR validación registro %d: %v", cnt+1, err)
 			}
 			cnt++
+			if cnt%50000 == 0 {
+				log.Printf("   → %d objetos leídos de %s...", cnt, filepath.Base(path))
+			}
 		}
-
-	default:
-		return 0, fmt.Errorf("archivo %s no parece ni array JSON ni NDJSON", path)
 	}
 
+	log.Printf("✔ Finalizado %s: %d objetos válidos", filepath.Base(path), cnt)
 	return cnt, nil
+}
+
+// countAllJSONObjects recorre el directorio y suma los conteos de cada JSON.
+func countAllJSONObjects(jsonDir string, excelKeys map[string]struct{}) (int, error) {
+	log.Printf("▶ Barrido de JSONs en directorio: %s", jsonDir)
+	total := 0
+	err := filepath.WalkDir(jsonDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || filepath.Ext(path) != ".json" {
+			return nil
+		}
+		cnt, err := countJSONObjects(path, excelKeys)
+		if err != nil {
+			return fmt.Errorf("en %s: %w", d.Name(), err)
+		}
+		log.Printf("   → %s: %d objetos", d.Name(), cnt)
+		total += cnt
+		return nil
+	})
+	log.Printf("✔ Total de objetos JSON leídos: %d", total)
+	return total, err
+}
+
+func main() {
+	excelPath := flag.String("excel", "", "ruta al archivo Excel .xlsx")
+	sheet := flag.String("sheet", "", "nombre de la hoja")
+	jsonDir := flag.String("jsondir", "", "directorio con JSONs")
+	flag.Parse()
+
+	if *excelPath == "" || *sheet == "" || *jsonDir == "" {
+		fmt.Println("Uso: cfdi-validator -excel input.xlsx -sheet Hoja1 -jsondir ./jsons")
+		os.Exit(1)
+	}
+
+	// 1) Leer cfdiId del Excel
+	headerName := excelHeaderByJSONField["cfdiId"]
+	excelKeys, err := loadExcelKeys(*excelPath, *sheet, headerName)
+	if err != nil {
+		log.Fatalf("Error cargando claves de Excel: %v", err)
+	}
+
+	// 2) Contar filas en Excel
+	excelCount, err := countExcelRowsStreaming(*excelPath, *sheet)
+	if err != nil {
+		log.Fatalf("Error leyendo Excel: %v", err)
+	}
+	fmt.Printf("Filas en Excel: %d\n", excelCount)
+
+	// 3) Contar y validar JSONs
+	jsonCount, err := countAllJSONObjects(*jsonDir, excelKeys)
+	if err != nil {
+		log.Fatalf("Error procesando JSONs: %v", err)
+	}
+	fmt.Printf("Objetos totales en JSONs: %d\n", jsonCount)
+
+	if excelCount != jsonCount {
+		log.Fatalf("❌ Mismatch: Excel=%d vs JSONs=%d", excelCount, jsonCount)
+	}
+	fmt.Println("✅ Coinciden filas Excel y total de objetos JSON.")
 }
